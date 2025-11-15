@@ -1,168 +1,199 @@
-# hybrid.py
-import os, time, argparse
-import numpy as np
+"""
+Hybrid Transformer + LSTM model for CSI prediction.
+
+Place this file under `models/hybrid.py` in your repo and import as:
+
+    from models.hybrid import HybridTransformerLSTM
+
+Features:
+- Transformer encoder over time dimension (captures long-range temporal patterns)
+- LSTM decoder autoregressively predicts future frames
+- Optional teacher forcing during training (forward supports `tgt` and `teacher_forcing_ratio`)
+- `generate()` method for clean inference
+- `save_checkpoint()` and `load_checkpoint()` helpers
+
+Input / output shapes:
+- enc_inp: [B, seq_len, enc_in] (float, real/imag flattened per time-slot)
+- tgt (optional, for teacher forcing): [B, pred_len, enc_in]
+- forward returns: [B, pred_len, enc_in]
+
+Make sure the `enc_in` (feature dim) you pass here matches the rest of your code (default in repo is 16).
+"""
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import scipy.io as scio
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+from typing import Optional
 
-from prediciton_code.metrics import NMSELoss
-from prediciton_code.test import HybridTransformerLSTM  # or import from where you defined it
 
-from prediciton_code.data import SeqData, LoadBatch
+class HybridTransformerLSTM(nn.Module):
+    def __init__(self,
+                 enc_in: int,
+                 d_model: int = 64,
+                 nhead: int = 4,
+                 trans_layers: int = 2,
+                 lstm_hidden: int = 256,
+                 lstm_layers: int = 1,
+                 pred_len: int = 5,
+                 dropout: float = 0.05,
+                 max_pos_len: int = 512):
+        """Constructor.
 
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', type=str, default='CDL-B/train')
-parser.add_argument('--prev_len', type=int, default=25)
-parser.add_argument('--min_prev', type=int, default=10)
-parser.add_argument('--max_prev', type=int, default=25)
-parser.add_argument('--pred_len', type=int, default=5)
-parser.add_argument('--batch', type=int, default=8)
-parser.add_argument('--epochs', type=int, default=80)
-parser.add_argument('--lr', type=float, default=1e-3)
-parser.add_argument('--weight_decay', type=float, default=1e-6)
-parser.add_argument('--d_model', type=int, default=64)
-parser.add_argument('--hs', type=int, default=256)
-parser.add_argument('--hl', type=int, default=2)
-parser.add_argument('--enc_in', type=int, default=None)  # if None will infer from data
-parser.add_argument('--save_dir', type=str, default='./checkpoints/hybrid/')
-parser.add_argument('--use_gpu', action='store_true')
-parser.add_argument('--teacher_start_epochs', type=int, default=15)
-parser.add_argument('--clip', type=float, default=1.0)
-args = parser.parse_args()
-
-device = torch.device('cuda' if args.use_gpu and torch.cuda.is_available() else 'cpu')
-os.makedirs(args.save_dir, exist_ok=True)
-
-# Dataset: use SeqData if it supports train mode; else implement simple SeqData-based dataset
-train_ds = SeqData(args.data_dir, prev_len=args.prev_len, pred_len=args.pred_len, mode='train',
-                  SNR=14, ir=1, samples=1, v_min=30, v_max=60)
-val_ds = SeqData(args.data_dir, prev_len=args.prev_len, pred_len=args.pred_len, mode='val',
-                SNR=14, ir=1, samples=1, v_min=30, v_max=60)
-
-# If SeqData returns (data, _, prev, pred) like your testData, we can create a small wrapper to yield sliding windows
-class TrainWrapper(torch.utils.data.Dataset):
-    def __init__(self, seqdata, min_prev, max_prev, pred_len):
-        self.seqdata = seqdata
-        self.min_prev = min_prev
-        self.max_prev = max_prev
+        Args:
+            enc_in: input feature dimension per time-step (e.g. 16)
+            d_model: transformer feature dimensionality
+            nhead: number of attention heads
+            trans_layers: number of transformer encoder layers
+            lstm_hidden: hidden size of LSTM decoder
+            lstm_layers: number of LSTM layers
+            pred_len: number of frames to predict
+            dropout: dropout in transformer layers
+            max_pos_len: maximum supported time steps for positional embeddings
+        """
+        super().__init__()
+        self.enc_in = enc_in
+        self.d_model = d_model
         self.pred_len = pred_len
-        # Build list of (file_idx, start) windows using default prev_len, but we will randomize prev in __getitem__
-        self.indexes = list(range(len(seqdata)))
-    def __len__(self):
-        # we will iterate over files; each epoch we will sample multiple windows by randomizing
-        return len(self.indexes) * 8  # multiplier to get more steps per epoch
-    def __getitem__(self, idx):
-        fidx = idx % len(self.indexes)
-        data, _, _, _ = self.seqdata[fidx]  # data: (L, M, Nr, Nt)
-        L = data.shape[0]
-        prev_len = np.random.randint(self.min_prev, self.max_prev+1)
-        max_start = L - (prev_len + self.pred_len)
-        if max_start < 0:
-            prev_len = self.min_prev
-            max_start = L - (prev_len + self.pred_len)
-        start = np.random.randint(0, max_start+1)
-        inp = data[start:start+prev_len]   # shape [prev_len, M, Nr, Nt]
-        tgt = data[start+prev_len:start+prev_len+self.pred_len]
-        # convert to real/imag if needed: assume SeqData already returns real (2-channel) if designed that way
-        # flatten per time-slot: shape -> [prev_len, enc_in]
-        # We'll reuse LoadBatch to make same encoding as your test script
-        # first convert to numpy if not
-        inp_flat = LoadBatch(inp).numpy() if hasattr(LoadBatch(inp),'numpy') else LoadBatch(inp)
-        tgt_flat = LoadBatch(tgt).numpy() if hasattr(LoadBatch(tgt),'numpy') else LoadBatch(tgt)
-        return torch.from_numpy(inp_flat).float(), torch.from_numpy(tgt_flat).float(), prev_len
 
-train_wrapper = TrainWrapper(train_ds, args.min_prev, args.max_prev, args.pred_len)
-train_loader = DataLoader(train_wrapper, batch_size=args.batch, shuffle=True, drop_last=True)
+        # project input features to d_model
+        self.input_proj = nn.Linear(enc_in, d_model)
+        # optional layernorm for stability
+        self.input_ln = nn.LayerNorm(d_model)
 
-# val loader: deterministic windows using seqdata indexing
-class ValWrapper(torch.utils.data.Dataset):
-    def __init__(self, seqdata, prev_len, pred_len):
-        self.seqdata = seqdata
-        self.prev_len = prev_len
+        # positional embeddings (learnable)
+        self.pos_emb = nn.Parameter(torch.randn(1, max_pos_len, d_model))
+
+        # transformer encoder (PyTorch native)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model,
+                                                   nhead=nhead,
+                                                   dim_feedforward=d_model * 4,
+                                                   dropout=dropout,
+                                                   activation='gelu',
+                                                   batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=trans_layers)
+
+        # LSTM decoder
+        # We feed the decoder with d_model embeddings; it outputs lstm_hidden which we map back to enc_in
+        self.lstm = nn.LSTM(input_size=d_model,
+                            hidden_size=lstm_hidden,
+                            num_layers=lstm_layers,
+                            batch_first=True)
+        self.dec_proj = nn.Linear(lstm_hidden, enc_in)
+
+        # to map predicted frame back to d_model for next-step input (feedback)
+        self.feed_back_proj = nn.Linear(enc_in, d_model)
+
+        # initialize parameters
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        # small init for stability
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, enc_inp: torch.Tensor, tgt: Optional[torch.Tensor] = None, teacher_forcing_ratio: float = 0.0):
+        """
+        Forward pass.
+
+        Args:
+            enc_inp: [B, seq_len, enc_in]
+            tgt: optional ground-truth future sequence [B, pred_len, enc_in], used for teacher forcing
+            teacher_forcing_ratio: float in [0,1], probability of using ground-truth at each decode step
+
+        Returns:
+            preds: [B, pred_len, enc_in]
+        """
+        b, seq_len, _ = enc_inp.shape
+        device = enc_inp.device
+
+        # encoder side
+        x = self.input_proj(enc_inp)  # [B, seq_len, d_model]
+        x = self.input_ln(x)
+        # add positional (slice to seq_len)
+        if seq_len <= self.pos_emb.size(1):
+            x = x + self.pos_emb[:, :seq_len, :]
+        else:
+            # if seq longer than pos_emb we broadcast last positions (unlikely for your setting)
+            pos = self.pos_emb[:, :self.pos_emb.size(1), :]
+            pos = F.interpolate(pos.permute(0,2,1), seq_len, mode='linear', align_corners=False).permute(0,2,1)
+            x = x + pos
+
+        # transformer encoding
+        enc_out = self.transformer(x)  # [B, seq_len, d_model]
+
+        # decoder initialization: seed with last encoder output
+        dec_input = enc_out[:, -1:, :]  # [B,1,d_model]
+
+        # initialize LSTM hidden states (zeros)
+        # shape for h0/c0: [num_layers, batch, hidden_size]
+        num_layers = self.lstm.num_layers
+        hidden = (torch.zeros(num_layers, b, self.lstm.hidden_size, device=device),
+                  torch.zeros(num_layers, b, self.lstm.hidden_size, device=device))
+
+        preds = []
+        # if teacher forcing desired, make sure tgt is provided
+        use_tf = (tgt is not None) and (teacher_forcing_ratio > 0.0)
+
+        # decode pred_len steps
+        for t in range(self.pred_len):
+            # LSTM expects input [B, seq_len=1, d_model]
+            out, hidden = self.lstm(dec_input, hidden)  # out: [B,1,lstm_hidden]
+            frame = self.dec_proj(out.squeeze(1))  # [B, enc_in]
+            preds.append(frame.unsqueeze(1))
+
+            if use_tf and torch.rand(1).item() < teacher_forcing_ratio:
+                # use ground-truth next frame as next input
+                next_in = tgt[:, t:t+1, :]
+                # project back to d_model
+                dec_input = self.feed_back_proj(next_in)
+            else:
+                # use model prediction as next input
+                dec_input = self.feed_back_proj(frame.unsqueeze(1))
+
+        preds = torch.cat(preds, dim=1)  # [B, pred_len, enc_in]
+        return preds
+
+    def generate(self, enc_inp: torch.Tensor, pred_len: Optional[int] = None) -> torch.Tensor:
+        """
+        Strict inference mode without teacher forcing.
+        Returns predictions as [B, pred_len, enc_in].
+        """
+        if pred_len is None:
+            pred_len = self.pred_len
+        # call forward with no tgt and tf=0
+        old_pred = self.pred_len
         self.pred_len = pred_len
-    def __len__(self):
-        return len(self.seqdata)
-    def __getitem__(self, idx):
-        data, _, _, _ = self.seqdata[idx]
-        L = data.shape[0]
-        # pick last window
-        start = L - (self.prev_len + self.pred_len)
-        if start < 0: start = 0
-        inp = data[start:start+self.prev_len]
-        tgt = data[start+self.prev_len:start+self.prev_len+self.pred_len]
-        inp_flat = LoadBatch(inp)
-        tgt_flat = LoadBatch(tgt)
-        return torch.from_numpy(inp_flat).float(), torch.from_numpy(tgt_flat).float()
+        with torch.no_grad():
+            preds = self.forward(enc_inp, tgt=None, teacher_forcing_ratio=0.0)
+        self.pred_len = old_pred
+        return preds
 
-val_wrapper = ValWrapper(val_ds, args.prev_len, args.pred_len)
-val_loader = DataLoader(val_wrapper, batch_size=args.batch, shuffle=False)
+    def save_checkpoint(self, path: str, optimizer: Optional[torch.optim.Optimizer] = None, epoch: Optional[int] = None):
+        """Save checkpoint dict to given path."""
+        ckpt = {
+            'state_dict': self.state_dict()
+        }
+        if optimizer is not None:
+            ckpt['optimizer'] = optimizer.state_dict()
+        if epoch is not None:
+            ckpt['epoch'] = epoch
+        torch.save(ckpt, path)
 
-# infer enc_in
-sample_inp, _ = train_wrapper[0][0], train_wrapper[0][1]
-enc_in = args.enc_in if args.enc_in is not None else sample_inp.shape[-1]
+    def load_checkpoint(self, path: str, map_location: Optional[str] = None, strict: bool = True):
+        """Load checkpoint from path. Accepts full dict or just state_dict."""
+        loc = map_location if map_location is not None else None
+        raw = torch.load(path, map_location=loc)
+        state = raw['state_dict'] if isinstance(raw, dict) and 'state_dict' in raw else raw
+        self.load_state_dict(state, strict=strict)
 
-# instantiate model
-model = HybridTransformerLSTM(enc_in=enc_in, d_model=args.d_model, nhead=4, num_layers=2,
-                             lstm_hidden=args.hs, lstm_layers=max(1,args.hl//1), pred_len=args.pred_len, dropout=0.05)
-model.to(device)
 
-criterion = nn.MSELoss()  # training with MSE on real+imag flattened vectors
-nmse_loss = NMSELoss()     # for validation reporting
-optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
-
-best_val = 1e9
-teacher_forcing_ratio = 1.0
-
-for epoch in range(1, args.epochs+1):
-    model.train()
-    t0 = time.time()
-    train_loss = 0.0
-    for batch_idx, (inp_batch, tgt_batch, prev_lens) in enumerate(train_loader):
-        inp_batch = inp_batch.to(device)        # [B, prev_len_max, enc_in]
-        tgt_batch = tgt_batch.to(device)        # [B, pred_len, enc_in]
-        B, seq_len, _ = inp_batch.shape
-        optimizer.zero_grad()
-
-        # Option A: full teacher forcing — feed ground truth frames into decoder by projecting them back
-        # Our Hybrid forward currently does not accept teacher forcing, so we implement a simple supervised loss:
-        # Run model autoregressively and compute MSE between outputs and tgt_batch.
-
-        preds = model(inp_batch)  # [B, pred_len, enc_in]
-        loss = criterion(preds, tgt_batch)
-        loss.backward()
-        if args.clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        optimizer.step()
-        train_loss += loss.item()
-
-    scheduler.step()
-
-    # validation
-    model.eval()
-    val_losses = []
-    val_nmse = []
-    with torch.no_grad():
-        for inp_batch, tgt_batch in val_loader:
-            inp_batch = inp_batch.to(device)
-            tgt_batch = tgt_batch.to(device)
-            preds = model(inp_batch)
-            val_losses.append(criterion(preds, tgt_batch).item())
-            # NMSE compute using your NMSELoss wrapper (expects real-valued tensors like in test script)
-            val_nmse.append(nmse_loss(preds.cpu(), tgt_batch.cpu().numpy() if isinstance(tgt_batch, np.ndarray) else tgt_batch.cpu()).item() if hasattr(nmse_loss,'__call__') else 0.0)
-
-    avg_train = train_loss / len(train_loader)
-    avg_val = np.mean(val_losses) if len(val_losses)>0 else 0.0
-    print(f"Epoch {epoch} train_loss={avg_train:.6f} val_loss={avg_val:.6f} time={time.time()-t0:.1f}s")
-
-    # save best
-    if avg_val < best_val:
-        best_val = avg_val
-        torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}, os.path.join(args.save_dir, 'hybrid_best.pth'))
-        print("Saved best checkpoint.")
-
-print("Training complete. Best val loss:", best_val)
+# quick smoke test when run as script
+if __name__ == '__main__':
+    # sanity-check shapes
+    B, seq_len, enc_in = 2, 25, 16
+    model = HybridTransformerLSTM(enc_in=enc_in, d_model=64, nhead=4, trans_layers=2, lstm_hidden=128, lstm_layers=1, pred_len=5)
+    x = torch.randn(B, seq_len, enc_in)
+    tgt = torch.randn(B, 5, enc_in)
+    out = model(x, tgt=tgt, teacher_forcing_ratio=0.5)
+    print('out shape', out.shape)  # should be [B, 5, enc_in]
