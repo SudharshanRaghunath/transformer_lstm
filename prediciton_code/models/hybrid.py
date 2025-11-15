@@ -1,4 +1,4 @@
-# train_hybrid.py
+# hybrid.py
 import os, time, argparse
 import numpy as np
 import torch
