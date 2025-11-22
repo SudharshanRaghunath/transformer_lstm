@@ -1,5 +1,0 @@
-torch.save({
-    'epoch': epoch,
-    'state_dict': hybrid_model.state_dict(),
-    'optimizer': optimizer.state_dict()
-}, 'checkpoints/hybrid/hybrid_best.pth')

@@ -1,0 +1,43 @@
+/Users/vishalraghunath/Documents/transformer_lstm/prediction_code/train_hybrid.py:165: ComplexWarning: Casting complex values to real discards the imaginary part
+  prev_rate[s] += get_zf_rate(H_hat_prev, H_true, SNR) / N_it
+/Users/vishalraghunath/Documents/transformer_lstm/prediction_code/train_hybrid.py:228: ComplexWarning: Casting complex values to real discards the imaginary part
+  Rate_hybrid[s] += get_zf_rate(H_hat, H_true, SNR) / N_it
+/Users/vishalraghunath/Documents/transformer_lstm/.venv/lib/python3.13/site-packages/matplotlib/cbook.py:1719: ComplexWarning: Casting complex values to real discards the imaginary part
+  return math.isfinite(val)
+/Users/vishalraghunath/Documents/transformer_lstm/.venv/lib/python3.13/site-packages/matplotlib/cbook.py:1355: ComplexWarning: Casting complex values to real discards the imaginary part
+  return np.asarray(x, float)
+Using device: cpu
+Number test samples: 16
+it=0 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[1/16] nmse(flat)=0.9962126016616821 nmse_hybrid_step0=0.06273736780432776
+it=1 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[2/16] nmse(flat)=0.9977834820747375 nmse_hybrid_step0=0.12499939123616108
+it=2 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[3/16] nmse(flat)=1.007354736328125 nmse_hybrid_step0=0.18806892053892293
+it=3 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[4/16] nmse(flat)=1.0016478300094604 nmse_hybrid_step0=0.25026738057472564
+it=4 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[5/16] nmse(flat)=1.0051881074905396 nmse_hybrid_step0=0.31436565102095154
+it=5 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[6/16] nmse(flat)=1.006466269493103 nmse_hybrid_step0=0.37747663701682543
+it=6 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[7/16] nmse(flat)=1.0040268898010254 nmse_hybrid_step0=0.4399197267516992
+it=7 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[8/16] nmse(flat)=1.003084659576416 nmse_hybrid_step0=0.5021596454882715
+it=8 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[9/16] nmse(flat)=1.0003663301467896 nmse_hybrid_step0=0.5639640118599275
+it=9 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[10/16] nmse(flat)=1.002066731452942 nmse_hybrid_step0=0.6260372057681945
+it=10 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[11/16] nmse(flat)=1.0036474466323853 nmse_hybrid_step0=0.6896373918070566
+it=11 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[12/16] nmse(flat)=1.0014057159423828 nmse_hybrid_step0=0.7518019444523362
+it=12 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[13/16] nmse(flat)=1.0039093494415283 nmse_hybrid_step0=0.8151226086085831
+it=13 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[14/16] nmse(flat)=1.0041965246200562 nmse_hybrid_step0=0.8769974522241063
+it=14 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[15/16] nmse(flat)=1.0045169591903687 nmse_hybrid_step0=0.939867886544983
+it=15 inp shape torch.Size([64, 25, 16]) label shape torch.Size([64, 5, 16])
+[16/16] nmse(flat)=0.9967820048332214 nmse_hybrid_step0=1.0028018084655446
+Done. Results and debug log in ./results/test_hybrid_debug.txt
